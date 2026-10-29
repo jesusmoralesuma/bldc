@@ -21,6 +21,7 @@
 #include "app.h"
 #include "conf_general.h"
 #include "mc_interface.h"
+#include <math.h>
 
 #ifdef USE_LISPBM
 #include "lispif.h"
@@ -33,7 +34,13 @@
 // Private variables
 bool volatile m_button_pressed = false;
 static volatile float m_inactivity_time = 0.0;
-static THD_WORKING_AREA(shutdown_thread_wa, 128);
+// Debounce settings for noise rejection
+#define SHUTDOWN_PRESS_DEBOUNCE_SAMPLES    30    // 30 * 10ms = 300ms continuous press/open
+#define SHUTDOWN_RELEASE_DEBOUNCE_SAMPLES  15    // 15 * 10ms = 150ms continuous release
+#define SHUTDOWN_EMERGENCY_HOLD_SAMPLES   300    // 300 * 10ms = 3.0s emergency hold while running
+#define SHUTDOWN_ERPM_RUNNING_THRESHOLD   200.0f // ERPM threshold to consider motor spinning
+
+static THD_WORKING_AREA(shutdown_thread_wa, 256);
 static mutex_t m_sample_mutex;
 static volatile bool m_init_done = false;
 static volatile bool m_sampling_disabled = false;
@@ -125,8 +132,30 @@ static THD_FUNCTION(shutdown_thread, arg) {
 
 		bool sample = HW_SAMPLE_SHUTDOWN();
 		chMtxUnlock(&m_sample_mutex);
-		bool clicked = m_button_pressed && !sample;
-		m_button_pressed = sample;
+
+		static int press_counter = 0;
+		static int release_counter = 0;
+		static bool debounced_pressed = false;
+
+		if (sample) {
+			press_counter++;
+			release_counter = 0;
+			if (press_counter >= SHUTDOWN_PRESS_DEBOUNCE_SAMPLES) {
+				debounced_pressed = true;
+			}
+		} else {
+			release_counter++;
+			press_counter = 0;
+			if (release_counter >= SHUTDOWN_RELEASE_DEBOUNCE_SAMPLES) {
+				debounced_pressed = false;
+			}
+		}
+
+		bool clicked = m_button_pressed && !debounced_pressed;
+		m_button_pressed = debounced_pressed;
+
+		bool motor_is_running = (fabsf(mc_interface_get_rpm()) > SHUTDOWN_ERPM_RUNNING_THRESHOLD);
+		bool emergency_shutdown = (press_counter >= SHUTDOWN_EMERGENCY_HOLD_SAMPLES);
 
 		const app_configuration *conf = app_get_configuration();
 
@@ -136,7 +165,7 @@ static THD_FUNCTION(shutdown_thread, arg) {
 
 		switch (conf->shutdown_mode) {
 		case SHUTDOWN_MODE_ALWAYS_OFF:
-			if (m_button_pressed) {
+			if (m_button_pressed && (!motor_is_running || emergency_shutdown)) {
 				gates_disabled_here = do_shutdown(true);
 			}
 			break;
@@ -158,7 +187,7 @@ static THD_FUNCTION(shutdown_thread, arg) {
 			break;
 
 		default:
-			if (clicked) {
+			if ((clicked && !motor_is_running) || emergency_shutdown) {
 				gates_disabled_here = do_shutdown(false);
 			}
 			break;
@@ -191,7 +220,7 @@ static THD_FUNCTION(shutdown_thread, arg) {
 			default: break;
 			}
 
-			if (m_inactivity_time >= shutdown_timeout && m_button_pressed) {
+			if (m_inactivity_time >= shutdown_timeout && m_button_pressed && !motor_is_running) {
 				gates_disabled_here = do_shutdown(false);
 			}
 		}
