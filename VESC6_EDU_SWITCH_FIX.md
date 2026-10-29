@@ -6,6 +6,15 @@
 
 ---
 
+## ⬇️ Quick Download (Pre-compiled Binary)
+
+If you want to immediately flash the fixed firmware to your VESC 6 EDU without compiling from source:
+* **Direct Binary Download:** [**du.bin (v6.05 with NC Switch Fix)**](https://github.com/jesusmoralesuma/bldc/releases/download/v6.05-vesc6-edu-fix/edu.bin) (524 KB)
+* **GitHub Release Page:** [Release 6.05-vesc6-edu-fix](https://github.com/jesusmoralesuma/bldc/releases/tag/v6.05-vesc6-edu-fix) (includes du.bin, du.hex, and du.elf)
+* **Repository Path:** [inaries/edu.bin](binaries/edu.bin)
+
+---
+
 ## 1. Executive Summary & Root Cause Analysis
 
 ### The Problem
