@@ -1,6 +1,6 @@
 # VESC 6 EDU / MK-Series: Normally Closed (NC) Power Switch Noise Immunity Fix
 
-> **Target Architecture:** VESC 6 EDU & VESC 6 MK3 / MK4 / MK5 / MK6  
+> **Target Architecture:** VESC 6 EDU 
 > **Firmware Branch:** `release_6_05`  
 > **Patch Branch:** `fix/vesc6-edu-nc-switch-emi`  
 
@@ -9,16 +9,16 @@
 ## ⬇️ Quick Download (Pre-compiled Binary)
 
 If you want to immediately flash the fixed firmware to your VESC 6 EDU without compiling from source:
-* **Direct Binary Download:** [**du.bin (v6.05 with NC Switch Fix)**](https://github.com/jesusmoralesuma/bldc/releases/download/v6.05-vesc6-edu-fix/edu.bin) (524 KB)
-* **GitHub Release Page:** [Release 6.05-vesc6-edu-fix](https://github.com/jesusmoralesuma/bldc/releases/tag/v6.05-vesc6-edu-fix) (includes du.bin, du.hex, and du.elf)
-* **Repository Path:** [inaries/edu.bin](binaries/edu.bin)
+* **Direct Binary Download:** [**edu.bin (v6.05 with NC Switch Fix)**](https://github.com/jesusmoralesuma/bldc/releases/download/v6.05-vesc6-edu-fix/edu.bin) (524 KB)
+* **GitHub Release Page:** [Release 6.05-vesc6-edu-fix](https://github.com/jesusmoralesuma/bldc/releases/tag/v6.05-vesc6-edu-fix) (includes edu.bin, edu.hex, and edu.elf)
+* **Repository Path:** [binaries/edu.bin](binaries/edu.bin)
 
 ---
 
 ## 1. Executive Summary & Root Cause Analysis
 
 ### The Problem
-When operating a **VESC 6 EDU** or **VESC 6 MK-series** controller equipped with an external power switch wired to GND via a **Normally Closed (NC)** contact, the controller experiences sudden, unintentional power-offs whenever the motor is run under load.
+When operating a **VESC 6 EDU** controller equipped with an external power switch wired to GND via a **Normally Closed (NC)** contact, the controller experiences sudden, unintentional power-offs whenever the motor is run under load.
 
 ### Electrical & Physical Mechanism
 1. **Dual-Role Pin Multiplexing:**
