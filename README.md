@@ -1,7 +1,7 @@
 > [!IMPORTANT]
 > **VESC 6 EDU / MK-Series Power Switch Noise Fix:**  
 > This branch (fix/vesc6-edu-nc-switch-emi) addresses unintentional power-offs caused by motor phase EMI, ground bounce, and transient noise on Normally Closed (NC) power switch lines.  
-> ⬇️ **[Download pre-compiled edu.bin (v6.05 with NC switch fix)](https://github.com/jesusmoralesuma/bldc/releases/download/v6.05-vesc6-edu-fix/edu.bin)**  
+> ⬇️ **[Download pre-compiled edu.bin (v6.05 with NC switch fix)](https://github.com/jesusmoralesuma/bldc/releases/download/v6.05-vesc6-edu-fix/edu.bin)**  
 > 📖 **Read the full root cause analysis, software/hardware mitigations, and build/flash guide in [VESC6_EDU_SWITCH_FIX.md](VESC6_EDU_SWITCH_FIX.md).**
 
 # VESC firmware
