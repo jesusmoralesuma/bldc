@@ -263,19 +263,11 @@ Install the GNU Arm Embedded Toolchain (`arm-none-eabi-gcc`) and `make`:
    ```
 2. Clean previous build artifacts:
    ```bash
-   # For VESC 6 EDU:
    make fw_edu_clean
    ```
 3. Compile the target:
    ```bash
-   # For VESC 6 EDU:
    make edu
-   
-   # (Or for standard VESC 6 MK series hardware):
-   # make fw_60_mk3
-   # make fw_60_mk4
-   # make fw_60_mk5
-   # make fw_60_mk6
    ```
 4. Verify output artifacts in `build/edu/`:
    * `build/edu/edu.bin` (Binary image for VESC Tool)
