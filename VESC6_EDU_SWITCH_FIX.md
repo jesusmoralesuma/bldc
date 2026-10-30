@@ -20,32 +20,31 @@ If you want to immediately flash the fixed firmware to your VESC 6 EDU without c
 ### The Problem
 When operating a **VESC 6 EDU** controller equipped with an external power switch wired to GND via a **Normally Closed (NC)** contact, the controller experiences sudden, unintentional power-offs whenever the motor is run under load.
 
-### Electrical & Physical Mechanism
-1. **Dual-Role Pin Multiplexing:**
-   On the VESC 6 hardware architecture, microcontroller pin `PC5` (`ADC1_IN15`) performs dual roles:
+### Electrical & Firmware Mechanism
+1. **Dual-Role Pin Multiplexing (`PC5` / `ADC1_IN15`):**
+   On the VESC 6 hardware architecture, microcontroller pin `PC5` performs dual roles:
    * **Digital Output (Power Latch):** Driven high (`HW_SHUTDOWN_HOLD_ON()`) to bias an external gatekeeper FET and maintain power to the internal buck regulators (3.3V / 5V rails).
-   * **Analog Input (Switch Sampling):** Periodically toggled by `hw_sample_shutdown_button()` to read voltage decay across the switch/capacitor circuit using the internal ADC (`ADC_IND_SHUTDOWN`).
+   * **Analog Input (Switch Sampling):** Periodically toggled by `hw_sample_shutdown_button()` to `PAL_MODE_INPUT_ANALOG` for 3 consecutive cycles (0.5 ms settling + 1.0 ms decay measurement + 1.0 ms recharge) to measure voltage decay across the switch/capacitor circuit using the internal ADC (`ADC_IND_SHUTDOWN`).
 
-2. **High-Impedance Vulnerability Window:**
-   To sample the switch, the firmware switches `PC5` from `PAL_MODE_OUTPUT_PUSHPULL` to `PAL_MODE_INPUT_ANALOG` for 3 consecutive cycles of 5 ticks + 2 ms (approximately 18 ms total). Across the ~30 ms shutdown thread cycle, the pin is floating in high-impedance mode for **over 60% of the entire controller operating time**.
+2. **Signal Polarity of `hw_sample_shutdown_button()`:**
+   * **Switch CLOSED to GND (Normal Run State / Button Untouched):** While `PC5` is switched to `PAL_MODE_INPUT_ANALOG`, the closed NC switch discharges the sensing capacitor toward GND over the 1 ms window (`val1 > val2`), producing a positive cumulative voltage drop `bt_diff > 0.12V`. Thus, **`HW_SAMPLE_SHUTDOWN()` returns `true` (`1`) during normal operation**.
+   * **Switch OPEN (Button Pressed / Shutdown Requested):** Opening the NC switch interrupts the discharge path (`val1 ≈ val2`, `bt_diff <= 0.12V`). Thus, **`HW_SAMPLE_SHUTDOWN()` returns `false` (`0`) when a shutdown is requested**.
 
 3. **Ground Bounce & Phase PWM EMI Under Load:**
-   Motor phases switch at 20–30 kHz PWM frequencies with rapid current transitions ($\frac{di}{dt}$ in excess of tens of amperes per microsecond). The switching current returning through the low-side shunt resistors creates high-frequency ground bounce between power GND and the microcontroller's analog/digital ground. An external switch cable acts as an inductive antenna picking up phase noise.
+   Motor phases switch at 20–30 kHz PWM frequencies with rapid current transitions ($\frac{di}{dt}$). The switching current returning through the low-side shunt resistors creates high-frequency ground bounce between power GND and the microcontroller's analog/digital ground. An external switch cable acts as an inductive antenna picking up phase noise.
+   During the 1 ms window between `val1` and `val2`, an EMI spike or upward shift in the external switch GND potential can cause `val2 > val1` (a negative `val1 - val2` delta) or momentarily prevent discharge. In the stock firmware, `bt_diff += (val1 - val2)` sums raw signed differences across only 3 cycles, so a single negative noise spike cancels out the positive discharge of the other cycles and drops `bt_diff` below `0.12V`, causing `hw_sample_shutdown_button()` to return `false`.
 
-4. **Overly Sensitive Decay Threshold:**
-   In original firmware (`hw_edu_core.c` and `hw_60_core.c`), the sampling function returns `true` if cumulative decay exceeds only **0.12V** (`bt_diff > 0.12`). Distributed over 3 ms of measurement, an average drop of just **40 mV** (less than 1.2% of the 3.3V reference) triggers a "pressed" reading. A momentary ground bounce or inductive noise dip easily exceeds this threshold.
-
-5. **Fatal Flaw in State Machine Debouncing (`shutdown.c`):**
+4. **Fatal Flaw in State Machine Debouncing (`shutdown.c`):**
    In `shutdown_thread()`:
    ```c
    bool sample = HW_SAMPLE_SHUTDOWN();
    bool clicked = m_button_pressed && !sample;
    m_button_pressed = sample;
    ```
-   There was **zero software debouncing**. If a single 10 ms sample registers `sample = 1` due to an EMI transient, followed by `sample = 0` when noise subsides, `clicked` immediately evaluates to `true`. Under the default configuration (`SHUTDOWN_MODE_OFF_AFTER_30M` or `SHUTDOWN_MODE_TOGGLE_BUTTON_ONLY`), `clicked` immediately invokes `do_shutdown(false)`, which cuts the gate drivers (`DISABLE_GATE()`) and drops the power hold line (`HW_SHUTDOWN_HOLD_OFF()`), causing an instantaneous power blackout.
+   There was **zero software debouncing**. During normal operation (`m_button_pressed == true`), **the very first loop iteration** where `HW_SAMPLE_SHUTDOWN()` returns `false` due to an EMI transient causes `clicked = m_button_pressed && !sample` (`true && !false`) to immediately evaluate to `true`. Under the default configuration (`SHUTDOWN_MODE_OFF_AFTER_30M` or `SHUTDOWN_MODE_TOGGLE_BUTTON_ONLY`), `clicked` immediately invokes `do_shutdown(false)`, which cuts the gate drivers (`DISABLE_GATE()`) and drops the power hold line (`HW_SHUTDOWN_HOLD_OFF()`), causing an instantaneous power blackout.
 
-6. **Absence of Motor-Running Interlock:**
-   The stock shutdown sequence never checked motor rotational speed (`mc_interface_get_rpm()`) or phase current. Any transient spike under load immediately killed power mid-operation.
+5. **Absence of Motor-Running Interlock:**
+   The stock shutdown sequence never checked motor rotational speed (`mc_interface_get_rpm()`). Any single false sample under load immediately killed power mid-operation.
 
 ---
 
@@ -53,10 +52,14 @@ When operating a **VESC 6 EDU** controller equipped with an external power switc
 
 ### A. Firmware Fix (The Permanent Solution)
 Implemented in this repository on branch `fix/vesc6-edu-nc-switch-emi`:
-* **Integrator-Based Debouncing:** Replaces single-sample transition detection with a consecutive-sample integrator (300 ms press qualification, 150 ms release qualification).
-* **Motor Running Interlock:** Prevents normal switch clicks from powering down the VESC while the motor is spinning (`|ERPM| > 200`).
-* **Emergency Long-Press Bypass:** Allows intentional shutdown during vehicle movement only if the switch is held open continuously for **3.0 seconds**.
-* **Hardened ADC Sampling:** Reduces the high-Z sampling exposure by >50%, increases decay threshold from `0.12V` to `0.35V`, and validates monotonic decay across multiple measurement cycles.
+* **Consecutive-Sample Debounce Integrator (`hwconf/shutdown.c`):**
+  * Requires `5` consecutive `true` samples (~88 ms) to arm the normal closed state (`debounced_closed = true`).
+  * When the motor is stopped (`|ERPM| <= 200`), requires `18` consecutive `false` samples (~315 ms of continuous switch opening) before transitioning `debounced_closed` to `false` and triggering `clicked`.
+* **Motor Running Safety Interlock & Emergency Hold:**
+  * While the motor is spinning (`|ERPM| > 200`), transient EMI bursts and short switch openings are completely ignored.
+  * To allow intentional emergency shutdown while the motor is spinning, the switch must remain continuously open (`sample == false`) for `170` consecutive cycles (~3.0 seconds).
+* **Negative EMI Spike Rejection (`hw_edu_core.c` & `hw_60_core.c`):**
+  * Clamps negative `val1 - val2` noise spikes (`if (diff > 0.0f) bt_diff += diff;`) so a single ground-bounce spike on `val2` cannot cancel out valid capacitor discharge measurements from the other cycles, while preserving the stock `chThdSleep(5)` (500 µs) settling time and `0.12V` RC decay threshold.
 
 ### B. Hardware & Wiring Mitigations
 If designing custom cabling or PCB assemblies:
@@ -82,7 +85,7 @@ The following patch has been applied to `release_6_05`:
 
 ```diff
 diff --git a/hwconf/shutdown.c b/hwconf/shutdown.c
-index 07ef167..a81030a 100644
+index 07ef167..51a94fa 100644
 --- a/hwconf/shutdown.c
 +++ b/hwconf/shutdown.c
 @@ -21,6 +21,7 @@
@@ -93,73 +96,71 @@ index 07ef167..a81030a 100644
  
  #ifdef USE_LISPBM
  #include "lispif.h"
-@@ -33,7 +34,13 @@
+@@ -33,7 +34,15 @@
  // Private variables
  bool volatile m_button_pressed = false;
  static volatile float m_inactivity_time = 0.0;
 -static THD_WORKING_AREA(shutdown_thread_wa, 128);
-+// Debounce settings for noise rejection
-+#define SHUTDOWN_PRESS_DEBOUNCE_SAMPLES    30    // 30 * 10ms = 300ms continuous press/open
-+#define SHUTDOWN_RELEASE_DEBOUNCE_SAMPLES  15    // 15 * 10ms = 150ms continuous release
-+#define SHUTDOWN_EMERGENCY_HOLD_SAMPLES   300    // 300 * 10ms = 3.0s emergency hold while running
++// Debounce settings for noise rejection (~17.5ms per loop iteration)
++// Note: HW_SAMPLE_SHUTDOWN() returns true when NC switch is CLOSED (normal run state)
++// and false when NC switch is OPEN (button pressed / shutdown requested).
++#define SHUTDOWN_CLOSE_DEBOUNCE_SAMPLES     5    // ~88ms continuous closed to arm normal state
++#define SHUTDOWN_OPEN_DEBOUNCE_SAMPLES     18    // ~315ms continuous open to trigger shutdown when stopped
++#define SHUTDOWN_EMERGENCY_OPEN_SAMPLES   170    // ~3.0s continuous open for emergency shutdown while running
 +#define SHUTDOWN_ERPM_RUNNING_THRESHOLD   200.0f // ERPM threshold to consider motor spinning
 +
 +static THD_WORKING_AREA(shutdown_thread_wa, 256);
  static mutex_t m_sample_mutex;
  static volatile bool m_init_done = false;
  static volatile bool m_sampling_disabled = false;
-@@ -125,8 +132,30 @@ static THD_FUNCTION(shutdown_thread, arg) {
+@@ -125,8 +134,35 @@ static THD_FUNCTION(shutdown_thread, arg) {
  
  		bool sample = HW_SAMPLE_SHUTDOWN();
  		chMtxUnlock(&m_sample_mutex);
 -		bool clicked = m_button_pressed && !sample;
 -		m_button_pressed = sample;
 +
-+		static int press_counter = 0;
-+		static int release_counter = 0;
-+		static bool debounced_pressed = false;
++		bool motor_is_running = (fabsf(mc_interface_get_rpm()) > SHUTDOWN_ERPM_RUNNING_THRESHOLD);
++		int required_open_samples = motor_is_running ?
++				SHUTDOWN_EMERGENCY_OPEN_SAMPLES : SHUTDOWN_OPEN_DEBOUNCE_SAMPLES;
++
++		static int open_counter = 0;
++		static int close_counter = 0;
++		static bool debounced_closed = false;
 +
 +		if (sample) {
-+			press_counter++;
-+			release_counter = 0;
-+			if (press_counter >= SHUTDOWN_PRESS_DEBOUNCE_SAMPLES) {
-+				debounced_pressed = true;
++			if (close_counter < SHUTDOWN_CLOSE_DEBOUNCE_SAMPLES) {
++				close_counter++;
++			}
++			open_counter = 0;
++			if (close_counter >= SHUTDOWN_CLOSE_DEBOUNCE_SAMPLES) {
++				debounced_closed = true;
 +			}
 +		} else {
-+			release_counter++;
-+			press_counter = 0;
-+			if (release_counter >= SHUTDOWN_RELEASE_DEBOUNCE_SAMPLES) {
-+				debounced_pressed = false;
++			if (open_counter < SHUTDOWN_EMERGENCY_OPEN_SAMPLES) {
++				open_counter++;
++			}
++			close_counter = 0;
++			if (open_counter >= required_open_samples) {
++				debounced_closed = false;
 +			}
 +		}
 +
-+		bool clicked = m_button_pressed && !debounced_pressed;
-+		m_button_pressed = debounced_pressed;
-+
-+		bool motor_is_running = (fabsf(mc_interface_get_rpm()) > SHUTDOWN_ERPM_RUNNING_THRESHOLD);
-+		bool emergency_shutdown = (press_counter >= SHUTDOWN_EMERGENCY_HOLD_SAMPLES);
++		bool clicked = m_button_pressed && !debounced_closed;
++		m_button_pressed = debounced_closed;
  
  		const app_configuration *conf = app_get_configuration();
  
-@@ -136,7 +165,7 @@ static THD_FUNCTION(shutdown_thread, arg) {
+@@ -136,7 +172,7 @@ static THD_FUNCTION(shutdown_thread, arg) {
  
  		switch (conf->shutdown_mode) {
  		case SHUTDOWN_MODE_ALWAYS_OFF:
 -			if (m_button_pressed) {
-+			if (m_button_pressed && (!motor_is_running || emergency_shutdown)) {
++			if (m_button_pressed && !motor_is_running) {
  				gates_disabled_here = do_shutdown(true);
  			}
  			break;
-@@ -158,7 +187,7 @@ static THD_FUNCTION(shutdown_thread, arg) {
- 			break;
- 
- 		default:
--			if (clicked) {
-+			if ((clicked && !motor_is_running) || emergency_shutdown) {
- 				gates_disabled_here = do_shutdown(false);
- 			}
- 			break;
-@@ -191,7 +220,7 @@ static THD_FUNCTION(shutdown_thread, arg) {
+@@ -191,7 +227,7 @@ static THD_FUNCTION(shutdown_thread, arg) {
  			default: break;
  			}
  
@@ -168,76 +169,38 @@ index 07ef167..a81030a 100644
  				gates_disabled_here = do_shutdown(false);
  			}
  		}
-diff --git a/hwconf/trampa/vesc_edu/hw_edu_core.c b/hwconf/trampa/vesc_edu/hw_edu_core.c
-index 37f830a..bed10e8 100644
---- a/hwconf/trampa/vesc_edu/hw_edu_core.c
-+++ b/hwconf/trampa/vesc_edu/hw_edu_core.c
-@@ -275,22 +275,27 @@ bool hw_sample_shutdown_button(void) {
- 	chMtxLock(&shutdown_mutex);
- 
- 	bt_diff = 0.0;
-+	int decay_cycles = 0;
- 
- 	for (int i = 0;i < 3;i++) {
- 		palSetPadMode(HW_SHUTDOWN_GPIO, HW_SHUTDOWN_PIN, PAL_MODE_INPUT_ANALOG);
--		chThdSleep(5);
-+		chThdSleep(2);
- 		float val1 = ADC_VOLTS(ADC_IND_SHUTDOWN);
- 		chThdSleepMilliseconds(1);
- 		float val2 = ADC_VOLTS(ADC_IND_SHUTDOWN);
- 		palSetPadMode(HW_SHUTDOWN_GPIO, HW_SHUTDOWN_PIN, PAL_MODE_OUTPUT_PUSHPULL);
- 		chThdSleepMilliseconds(1);
- 
--		bt_diff += (val1 - val2);
-+		float diff = val1 - val2;
-+		if (diff > 0.05f) {
-+			decay_cycles++;
-+			bt_diff += diff;
-+		}
- 	}
- 
- 	chMtxUnlock(&shutdown_mutex);
- 
--	return (bt_diff > 0.12);
-+	return (bt_diff > 0.35f && decay_cycles >= 2);
- }
- 
- static void terminal_shutdown_now(int argc, const char **argv) {
 diff --git a/hwconf/trampa/vesc6/hw_60_core.c b/hwconf/trampa/vesc6/hw_60_core.c
-index edf5809..99dee6d 100644
+index edf5809..c6835ee 100644
 --- a/hwconf/trampa/vesc6/hw_60_core.c
 +++ b/hwconf/trampa/vesc6/hw_60_core.c
-@@ -312,22 +312,27 @@ bool hw_sample_shutdown_button(void) {
- 	chMtxLock(&shutdown_mutex);
- 
- 	bt_diff = 0.0;
-+	int decay_cycles = 0;
- 
- 	for (int i = 0;i < 3;i++) {
- 		palSetPadMode(HW_SHUTDOWN_GPIO, HW_SHUTDOWN_PIN, PAL_MODE_INPUT_ANALOG);
--		chThdSleep(5);
-+		chThdSleep(2);
- 		float val1 = ADC_VOLTS(ADC_IND_SHUTDOWN);
- 		chThdSleepMilliseconds(1);
- 		float val2 = ADC_VOLTS(ADC_IND_SHUTDOWN);
+@@ -322,7 +322,10 @@ bool hw_sample_shutdown_button(void) {
  		palSetPadMode(HW_SHUTDOWN_GPIO, HW_SHUTDOWN_PIN, PAL_MODE_OUTPUT_PUSHPULL);
  		chThdSleepMilliseconds(1);
  
 -		bt_diff += (val1 - val2);
 +		float diff = val1 - val2;
-+		if (diff > 0.05f) {
-+			decay_cycles++;
++		if (diff > 0.0f) {
 +			bt_diff += diff;
 +		}
  	}
  
  	chMtxUnlock(&shutdown_mutex);
+diff --git a/hwconf/trampa/vesc_edu/hw_edu_core.c b/hwconf/trampa/vesc_edu/hw_edu_core.c
+index 37f830a..2829cb0 100644
+--- a/hwconf/trampa/vesc_edu/hw_edu_core.c
++++ b/hwconf/trampa/vesc_edu/hw_edu_core.c
+@@ -285,7 +285,10 @@ bool hw_sample_shutdown_button(void) {
+ 		palSetPadMode(HW_SHUTDOWN_GPIO, HW_SHUTDOWN_PIN, PAL_MODE_OUTPUT_PUSHPULL);
+ 		chThdSleepMilliseconds(1);
  
--	return (bt_diff > 0.12);
-+	return (bt_diff > 0.35f && decay_cycles >= 2);
- }
+-		bt_diff += (val1 - val2);
++		float diff = val1 - val2;
++		if (diff > 0.0f) {
++			bt_diff += diff;
++		}
+ 	}
  
- static void terminal_shutdown_now(int argc, const char **argv) {
+ 	chMtxUnlock(&shutdown_mutex);
 ```
 
 ---
@@ -290,6 +253,7 @@ Once flashed, test noise rejection in real time:
    ```text
    test_button
    ```
-3. Run the motor under high load. Observe that `BT:` stays firmly at `0 0.00`.
-4. Tap or vibrate the NC switch while operating: the motor should continue spinning without interruption.
-5. Stop the motor. Open the switch and release it: the VESC will perform a clean, controlled power-off.
+3. When the NC switch is closed (normal operation), `BT:` stays at `1 <bt_diff>` (with `bt_diff > 0.12`).
+4. When the NC switch is opened (shutdown requested), `BT:` drops to `0 <bt_diff>` (with `bt_diff <= 0.12`).
+5. Run the motor under high load: transient EMI spikes will no longer trigger an unintentional power-off.
+6. Stop the motor and open the switch for >0.3 seconds: the VESC will perform a clean, controlled power-off.

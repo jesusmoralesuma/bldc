@@ -312,11 +312,10 @@ bool hw_sample_shutdown_button(void) {
 	chMtxLock(&shutdown_mutex);
 
 	bt_diff = 0.0;
-	int decay_cycles = 0;
 
 	for (int i = 0;i < 3;i++) {
 		palSetPadMode(HW_SHUTDOWN_GPIO, HW_SHUTDOWN_PIN, PAL_MODE_INPUT_ANALOG);
-		chThdSleep(2);
+		chThdSleep(5);
 		float val1 = ADC_VOLTS(ADC_IND_SHUTDOWN);
 		chThdSleepMilliseconds(1);
 		float val2 = ADC_VOLTS(ADC_IND_SHUTDOWN);
@@ -324,15 +323,14 @@ bool hw_sample_shutdown_button(void) {
 		chThdSleepMilliseconds(1);
 
 		float diff = val1 - val2;
-		if (diff > 0.05f) {
-			decay_cycles++;
+		if (diff > 0.0f) {
 			bt_diff += diff;
 		}
 	}
 
 	chMtxUnlock(&shutdown_mutex);
 
-	return (bt_diff > 0.35f && decay_cycles >= 2);
+	return (bt_diff > 0.12);
 }
 
 static void terminal_shutdown_now(int argc, const char **argv) {

@@ -34,10 +34,12 @@
 // Private variables
 bool volatile m_button_pressed = false;
 static volatile float m_inactivity_time = 0.0;
-// Debounce settings for noise rejection
-#define SHUTDOWN_PRESS_DEBOUNCE_SAMPLES    30    // 30 * 10ms = 300ms continuous press/open
-#define SHUTDOWN_RELEASE_DEBOUNCE_SAMPLES  15    // 15 * 10ms = 150ms continuous release
-#define SHUTDOWN_EMERGENCY_HOLD_SAMPLES   300    // 300 * 10ms = 3.0s emergency hold while running
+// Debounce settings for noise rejection (~17.5ms per loop iteration)
+// Note: HW_SAMPLE_SHUTDOWN() returns true when NC switch is CLOSED (normal run state)
+// and false when NC switch is OPEN (button pressed / shutdown requested).
+#define SHUTDOWN_CLOSE_DEBOUNCE_SAMPLES     5    // ~88ms continuous closed to arm normal state
+#define SHUTDOWN_OPEN_DEBOUNCE_SAMPLES     18    // ~315ms continuous open to trigger shutdown when stopped
+#define SHUTDOWN_EMERGENCY_OPEN_SAMPLES   170    // ~3.0s continuous open for emergency shutdown while running
 #define SHUTDOWN_ERPM_RUNNING_THRESHOLD   200.0f // ERPM threshold to consider motor spinning
 
 static THD_WORKING_AREA(shutdown_thread_wa, 256);
@@ -133,29 +135,34 @@ static THD_FUNCTION(shutdown_thread, arg) {
 		bool sample = HW_SAMPLE_SHUTDOWN();
 		chMtxUnlock(&m_sample_mutex);
 
-		static int press_counter = 0;
-		static int release_counter = 0;
-		static bool debounced_pressed = false;
+		bool motor_is_running = (fabsf(mc_interface_get_rpm()) > SHUTDOWN_ERPM_RUNNING_THRESHOLD);
+		int required_open_samples = motor_is_running ?
+				SHUTDOWN_EMERGENCY_OPEN_SAMPLES : SHUTDOWN_OPEN_DEBOUNCE_SAMPLES;
+
+		static int open_counter = 0;
+		static int close_counter = 0;
+		static bool debounced_closed = false;
 
 		if (sample) {
-			press_counter++;
-			release_counter = 0;
-			if (press_counter >= SHUTDOWN_PRESS_DEBOUNCE_SAMPLES) {
-				debounced_pressed = true;
+			if (close_counter < SHUTDOWN_CLOSE_DEBOUNCE_SAMPLES) {
+				close_counter++;
+			}
+			open_counter = 0;
+			if (close_counter >= SHUTDOWN_CLOSE_DEBOUNCE_SAMPLES) {
+				debounced_closed = true;
 			}
 		} else {
-			release_counter++;
-			press_counter = 0;
-			if (release_counter >= SHUTDOWN_RELEASE_DEBOUNCE_SAMPLES) {
-				debounced_pressed = false;
+			if (open_counter < SHUTDOWN_EMERGENCY_OPEN_SAMPLES) {
+				open_counter++;
+			}
+			close_counter = 0;
+			if (open_counter >= required_open_samples) {
+				debounced_closed = false;
 			}
 		}
 
-		bool clicked = m_button_pressed && !debounced_pressed;
-		m_button_pressed = debounced_pressed;
-
-		bool motor_is_running = (fabsf(mc_interface_get_rpm()) > SHUTDOWN_ERPM_RUNNING_THRESHOLD);
-		bool emergency_shutdown = (press_counter >= SHUTDOWN_EMERGENCY_HOLD_SAMPLES);
+		bool clicked = m_button_pressed && !debounced_closed;
+		m_button_pressed = debounced_closed;
 
 		const app_configuration *conf = app_get_configuration();
 
@@ -165,7 +172,7 @@ static THD_FUNCTION(shutdown_thread, arg) {
 
 		switch (conf->shutdown_mode) {
 		case SHUTDOWN_MODE_ALWAYS_OFF:
-			if (m_button_pressed && (!motor_is_running || emergency_shutdown)) {
+			if (m_button_pressed && !motor_is_running) {
 				gates_disabled_here = do_shutdown(true);
 			}
 			break;
@@ -187,7 +194,7 @@ static THD_FUNCTION(shutdown_thread, arg) {
 			break;
 
 		default:
-			if ((clicked && !motor_is_running) || emergency_shutdown) {
+			if (clicked) {
 				gates_disabled_here = do_shutdown(false);
 			}
 			break;
